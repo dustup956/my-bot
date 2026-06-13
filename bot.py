@@ -1,9 +1,20 @@
+import logging
+import os
+import time
+
 import requests
 from telegram import Bot
+from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler
 import asyncio
 
-TOKEN = "8934098702:AAGU4a-elfGLbbXH1h8jqABBFDWmLhtlnFY"
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8934098702:AAGU4a-elfGLbbXH1h8jqABBFDWmLhtlnFY")
 YOUR_CHANNEL_ID = -1004305027195
 
 EMOJI_MAP = {
@@ -90,40 +101,82 @@ def get_stock():
 
         return msg[:4000], has_alert, ", ".join(all_alert_names)
 
-    except Exception as e:
-        return f"❌ Ошибка: {str(e)[:200]}", False, ""
+    except requests.RequestException as e:
+        logger.exception("Network error while fetching stock data")
+        return f"❌ Ошибка сети: {e}", False, ""
+    except (KeyError, ValueError, TypeError) as e:
+        logger.exception("Failed to parse stock API response")
+        return f"❌ Ошибка обработки данных: {e}", False, ""
 
 async def send_stock(bot):
     message, has_alert, alert_names = get_stock()
-    if has_alert:
-        header = f"🚨 **{alert_names} В МАГАЗИНЕ!** 🚨\n@everyone\n\n"
-        await bot.send_message(chat_id=YOUR_CHANNEL_ID, text=header + message, parse_mode='Markdown', disable_notification=False)
-    else:
-        await bot.send_message(chat_id=YOUR_CHANNEL_ID, text=message, parse_mode='Markdown', disable_notification=True)
-    print("✅ Сток отправлен")
+    try:
+        if has_alert:
+            header = f"🚨 **{alert_names} В МАГАЗИНЕ!** 🚨\n@everyone\n\n"
+            await bot.send_message(chat_id=YOUR_CHANNEL_ID, text=header + message, parse_mode='Markdown', disable_notification=False)
+        else:
+            await bot.send_message(chat_id=YOUR_CHANNEL_ID, text=message, parse_mode='Markdown', disable_notification=True)
+    except TelegramError as e:
+        logger.error("Failed to send stock message to Telegram: %s", e)
+        raise
+    logger.info("Сток отправлен")
 
 async def stock_loop(bot):
-    import time
+    consecutive_failures = 0
     while True:
-        await send_stock(bot)
+        try:
+            await send_stock(bot)
+            consecutive_failures = 0
+        except TelegramError:
+            consecutive_failures += 1
+            backoff = min(60 * consecutive_failures, 300)
+            logger.warning(
+                "Stock update failed (%d consecutive). Retrying in %ds.",
+                consecutive_failures, backoff,
+            )
+            await asyncio.sleep(backoff)
+            continue
+        except Exception:
+            consecutive_failures += 1
+            logger.exception("Unexpected error in stock loop (attempt %d)", consecutive_failures)
+            await asyncio.sleep(30)
+            continue
+
         now = time.time()
         next_restock = (int(now) // 300 + 1) * 300
         wait = next_restock - now + 2
-        print(f"⏳ Следующий сток через {int(wait)} сек.")
+        logger.info("Следующий сток через %d сек.", int(wait))
         await asyncio.sleep(wait)
 
 async def start_cmd(update, context):
-    await update.message.reply_text("✅ Бот работает!")
+    try:
+        await update.message.reply_text("✅ Бот работает!")
+    except TelegramError as e:
+        logger.error("Failed to reply to /start command: %s", e)
 
 async def main():
-    app = Application.builder().token(TOKEN).build()
+    if not TOKEN:
+        logger.critical("TELEGRAM_BOT_TOKEN is not set")
+        return
+
+    try:
+        app = Application.builder().token(TOKEN).build()
+    except Exception:
+        logger.exception("Failed to build Telegram application")
+        return
+
     app.add_handler(CommandHandler("start", start_cmd))
 
     async with app:
         await app.start()
         await app.updater.start_polling()
-        print("Бот запущен...")
+        logger.info("Бот запущен")
         await stock_loop(app.bot)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception:
+        logger.exception("Fatal error")
