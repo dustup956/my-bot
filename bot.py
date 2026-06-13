@@ -1,10 +1,13 @@
+import os
+import sys
+
 import requests
 from telegram import Bot
 from telegram.ext import Application, CommandHandler
 import asyncio
 
-TOKEN = "8934098702:AAGU4a-elfGLbbXH1h8jqABBFDWmLhtlnFY"
-YOUR_CHANNEL_ID = -1004305027195
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+YOUR_CHANNEL_ID = int(os.environ.get("TELEGRAM_CHANNEL_ID", "0"))
 
 EMOJI_MAP = {
     "carrot": "🥕", "tomato": "🍅", "strawberry": "🍓", "blueberry": "🫐",
@@ -91,7 +94,8 @@ def get_stock():
         return msg[:4000], has_alert, ", ".join(all_alert_names)
 
     except Exception as e:
-        return f"❌ Ошибка: {str(e)[:200]}", False, ""
+        print(f"Stock fetch error: {e}")
+        return "❌ Не удалось получить данные. Попробуйте позже.", False, ""
 
 async def send_stock(bot):
     message, has_alert, alert_names = get_stock()
@@ -116,6 +120,11 @@ async def start_cmd(update, context):
     await update.message.reply_text("✅ Бот работает!")
 
 async def main():
+    if not TOKEN:
+        sys.exit("TELEGRAM_BOT_TOKEN environment variable is not set")
+    if not YOUR_CHANNEL_ID:
+        sys.exit("TELEGRAM_CHANNEL_ID environment variable is not set")
+
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
 
